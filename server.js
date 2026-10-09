@@ -21,15 +21,19 @@ fs.mkdirSync(STORE, { recursive: true });
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
+    console.log(`[RUN] ${command} ${args.join(" ")}`);
     const child = spawn(command, args, { ...options });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", d => { stdout += d.toString(); });
-    child.stderr?.on("data", d => { stderr += d.toString(); });
+    child.stderr?.on("data", d => { stderr += d.toString(); console.error(`[${command}]`, d.toString()); });
     child.on("error", reject);
     child.on("close", code => {
       if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(stderr.slice(-5000) || `${command} exited with code ${code}`));
+      else {
+        console.error(`[FAIL] ${command} code ${code} | STDERR: ${stderr.slice(-8000)} | STDOUT: ${stdout.slice(-2000)}`);
+        reject(new Error(stderr.slice(-5000) || stdout.slice(-5000) || `${command} exited with code ${code}`));
+      }
     });
   });
 }
@@ -39,9 +43,7 @@ function isYouTubeUrl(value) {
     const u = new URL(value);
     const h = u.hostname.toLowerCase();
     return ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtube-nocookie.com"].includes(h);
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 function publicUrl(req, id) {
@@ -53,7 +55,6 @@ async function extractFullAudio(url) {
   const id = crypto.randomUUID();
   const out = path.join(STORE, `${id}.mp3`);
 
-  // FIXED: Added android,web clients + correct underscore + both bgutil ports fallback
   const ytArgs = [
     "--no-playlist",
     "--no-warnings",
@@ -66,7 +67,6 @@ async function extractFullAudio(url) {
     "--js-runtimes", "node",
     "--extractor-args", "youtube:player_client=android,web,mweb",
     "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
-    "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:3030",
     "-o", out,
     url
   ];
@@ -77,15 +77,16 @@ async function extractFullAudio(url) {
       tempCookieFile = path.join(STORE, `${id}-cookies.txt`);
       fs.copyFileSync(YOUTUBE_COOKIE_FILE, tempCookieFile);
       ytArgs.splice(1, 0, "--cookies", tempCookieFile);
+      console.log("[COOKIES] Using cookies file size:", fs.statSync(tempCookieFile).size);
+    } else {
+      console.warn("[COOKIES] No cookies file found at /etc/secrets/cookies.txt");
     }
     await run("yt-dlp", ytArgs, { env: { ...process.env } });
   } finally {
-    if (tempCookieFile) {
-      try { fs.rmSync(tempCookieFile, { force: true }); } catch {}
-    }
+    if (tempCookieFile) { try { fs.rmSync(tempCookieFile, { force: true }); } catch {} }
   }
 
-  if (!fs.existsSync(out)) throw new Error("The complete audio file was not created.");
+  if (!fs.existsSync(out)) throw new Error("The complete audio file was not created. Check logs for yt-dlp error above.");
   const stat = fs.statSync(out);
   if (!stat.size) throw new Error("The extracted audio file is empty.");
   return { id, path: out, size: stat.size };
@@ -136,7 +137,18 @@ async function transcribeCompleteAudio(filePath, language) {
 }
 
 app.get("/", (_req, res) => { res.json({ ok: true, service: "VoxScript full-audio backend" }); });
+
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+app.get("/debug", async (_req, res) => {
+  try {
+    const v = await run("yt-dlp", ["--version"]);
+    const cookieExists = fs.existsSync("/etc/secrets/cookies.txt");
+    const cookieSize = cookieExists ? fs.statSync("/etc/secrets/cookies.txt").size : 0;
+    const bgLog = fs.existsSync("/tmp/bgutil-provider.log") ? fs.readFileSync("/tmp/bgutil-provider.log","utf8").slice(-3000) : "no log file yet";
+    res.json({ ytDlpVersion: v.stdout.trim(), cookieExists, cookieSize, bgLog });
+  } catch(e){ res.json({ error: e.message, stack: e.stack }); }
+});
 
 app.post("/extract", async (req, res) => {
   try {
@@ -145,7 +157,10 @@ app.post("/extract", async (req, res) => {
     const result = await extractFullAudio(url);
     const filename = `voxscript-${result.id}.mp3`;
     res.json({ audioUrl: publicUrl(req, result.id), downloadUrl: `${publicUrl(req, result.id)}?download=1`, filename, fileSize: result.size, format: "mp3", completeAudio: true });
-  } catch (error) { console.error("Extraction error:", error); res.status(502).json({ error: error?.message || "YouTube audio extraction failed." }); }
+  } catch (error) { 
+    console.error("Extraction error FULL:", error);
+    res.status(502).json({ error: error?.message || "YouTube audio extraction failed.", details: String(error).slice(0, 2000) }); 
+  }
 });
 
 app.post("/transcribe", async (req, res) => {
@@ -156,7 +171,10 @@ app.post("/transcribe", async (req, res) => {
     result = await extractFullAudio(url);
     const data = await transcribeCompleteAudio(result.path, language);
     return res.json({ transcript: data.text||"", language: data.language||language||"auto", duration: data.duration||null, segments: data.segments||[], words: data.words||[], source: "youtube-full-audio-render-groq-whisper", audioUrl: publicUrl(req, result.id), downloadUrl: `${publicUrl(req, result.id)}?download=1`, extraction: { format: "full-audio-mp3", filename: `voxscript-${result.id}.mp3`, file_size: result.size, completeAudio: true } });
-  } catch (error) { console.error("Transcription error:", error); return res.status(502).json({ error: error?.message || "Full-audio transcription failed." }); }
+  } catch (error) { 
+    console.error("Transcription error FULL:", error);
+    return res.status(502).json({ error: error?.message || "Full-audio transcription failed.", details: String(error).slice(0, 2000) }); 
+  }
 });
 
 app.get("/audio/:id", (req, res) => {
