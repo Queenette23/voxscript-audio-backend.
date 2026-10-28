@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: voxscript-audio-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./render-audio-backend/Dockerfile
+    # The Dockerfile does COPY package.json / server.js, which live in render-audio-backend/.
+    # With the old context "." Render would copy the repo-root package.json and fail on server.js.
+    dockerContext: ./render-audio-backend
+    healthCheckPath: /health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: ALLOWED_ORIGINS   # e.g. https://voxscript-youtube-transcriber.vercel.app
+        sync: false
+      - key: LLAMA_MODEL
+        value: llama-3.3-70b-versatile
