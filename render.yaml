@@ -15,5 +15,7 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS   # e.g. https://voxscript-youtube-transcriber.vercel.app
         sync: false
+      - key: YTDLP_PROXY
+        sync: false
       - key: LLAMA_MODEL
         value: llama-3.3-70b-versatile
